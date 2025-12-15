@@ -11,13 +11,16 @@ use shuttle_runtime::SecretStore;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::{info, instrument, warn};
+use wp_mini::WattpadClient;
 use wp_mini_epub::{download_story_to_memory, login, AppError};
 
 const CONCURRENT_CHAPTER_REQUESTS: usize = 10;
 
 #[derive(Clone)]
 struct AppState {
-    anon_client: Arc<Client>,
+    reqwest_client: Arc<Client>,
+    wattpad_client: Arc<WattpadClient>,
+
 }
 
 #[derive(Deserialize)]
@@ -46,16 +49,20 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> shuttle_
 
     const APP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
 
-    let shared_client = Arc::new(
+    let shared_reqwest_client = Arc::new(
         Client::builder()
             .user_agent(APP_USER_AGENT)
-            .cookie_store(true)
             .build()
             .expect("Failed to create reqwest client"),
     );
 
+    let shared_wattpad_client = Arc::new(
+        WattpadClient::new()
+    );
+
     let app_state = AppState {
-        anon_client: shared_client,
+        reqwest_client: shared_reqwest_client,
+        wattpad_client: shared_wattpad_client,
     };
 
     // The router definition is the same, but we add the CORS layer
@@ -96,11 +103,13 @@ async fn generate_epub(
         (Some(user), Some(pass)) => {
             info!("Handling authenticated request");
 
-            let auth_client = state.anon_client.clone();
+            let auth_wattpad_client = WattpadClient::new();
 
-            login(&auth_client, &user, &pass).await?;
+            login(&auth_wattpad_client, &user, &pass).await?;
+
             download_story_to_memory(
-                &auth_client,
+                &auth_wattpad_client,
+                &state.reqwest_client,
                 payload.story_id,
                 payload.is_embed_images,
                 CONCURRENT_CHAPTER_REQUESTS,
@@ -111,7 +120,8 @@ async fn generate_epub(
         _ => {
             info!("Handling anonymous request");
             download_story_to_memory(
-                &state.anon_client,
+                &state.wattpad_client,
+                &state.reqwest_client,
                 payload.story_id,
                 payload.is_embed_images,
                 CONCURRENT_CHAPTER_REQUESTS,
